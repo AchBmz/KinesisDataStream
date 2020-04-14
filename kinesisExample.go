@@ -1,18 +1,21 @@
 package main
 
 import (
-	"fmt"
-	"github.com/3almadmoon/protobuf/common"
-	user "github.com/3almadmoon/protobuf/usersvc"
+	"encoding/json"
+	"github.com/a8m/kinesis-producer"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	"log"
 	"sync"
 	"time"
 )
+
+type UserIDRequest struct {
+	UserID        string
+	CorrelationID string
+}
 
 func main() {
 	var wg sync.WaitGroup
@@ -22,36 +25,32 @@ func main() {
 	go consume(kc, streamName)
 	defer wg.Wait()
 
-	request := &user.UserIDRequest{
-		UserID:        &common.UserID{Value: uuid.New().String()},
+	request := UserIDRequest{
+		UserID:        uuid.New().String(),
 		CorrelationID: uuid.New().String(),
 	}
+	req, _ := json.Marshal(request)
 
-	req, err := proto.Marshal(request)
-	if err != nil {
-		fmt.Println("Marshal Error: ", err)
-		panic(err)
-	}
-
-	putOutput, err := kc.PutRecord(&kinesis.PutRecordInput{
-		Data:         req,
-		StreamName:   aws.String(streamName),
-		PartitionKey: aws.String("1"),
+	pr := producer.New(&producer.Config{
+		StreamName:   streamName,
+		BacklogCount: 2000,
+		Client:       kc,
 	})
+	pr.Start()
+	err := pr.Put(req, "1")
 	if err != nil {
-		fmt.Println("Put Record Error: ", err)
-		panic(err)
+		log.Printf("Put Record error: %v\n", err)
 	}
-	fmt.Printf("Put Record Output: %v\n", putOutput)
+	pr.Stop()
 }
 
 func consume(kc *kinesis.Kinesis, streamName string) {
 	streams, err := kc.DescribeStream(&kinesis.DescribeStreamInput{StreamName: &streamName})
 	if err != nil {
-		fmt.Println("Describe Stream Error: ", err)
+		log.Println("Describe Stream Error: ", err)
 		log.Panic(err)
 	}
-	fmt.Println(streams)
+	log.Println(streams)
 	// retrieve iterator
 	iteratorOutput, err := kc.GetShardIterator(&kinesis.GetShardIteratorInput{
 		ShardId:           aws.String(*streams.StreamDescription.Shards[0].ShardId),
@@ -59,12 +58,12 @@ func consume(kc *kinesis.Kinesis, streamName string) {
 		StreamName:        &streamName,
 	})
 	if err != nil {
-		fmt.Println("Get Shard Iterator Error: ", err)
+		log.Println("Get Shard Iterator Error: ", err)
 		log.Panic(err)
 	}
 	shardIterator := iteratorOutput.ShardIterator
 
-	// get data using infinite loop
+	// get data in infinite loop
 	for {
 		// get records using shard iterator
 		records, err := kc.GetRecords(&kinesis.GetRecordsInput{
@@ -79,7 +78,7 @@ func consume(kc *kinesis.Kinesis, streamName string) {
 		// process the data
 		var a *string
 		if len(records.Records) > 0 {
-			processRecords(records.Records)
+			log.Printf("records: %v", records.Records)
 		} else if records.NextShardIterator == a || shardIterator == records.NextShardIterator {
 			log.Printf("GetRecords Error: %v\n", err)
 			break
@@ -97,19 +96,4 @@ func getKinesisClient() *kinesis.Kinesis {
 	}))
 	kc := kinesis.New(s)
 	return kc
-}
-
-// processRecords loops over data returned from GetRecords and displays every record
-func processRecords(records []*kinesis.Record) {
-	for _, d := range records {
-		fmt.Println(records)
-		newMessage := &user.UserIDRequest{}
-		err := proto.Unmarshal(d.Data, newMessage)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		log.Printf("GetRecords Data: %v\n", newMessage)
-	}
-	return
 }
